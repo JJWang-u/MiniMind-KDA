@@ -56,6 +56,7 @@ MiniMind-KDA/
 ├── scripts/
 │   └── convert_model.py          # torch 权重 → transformers 格式（lm-eval 评测用）
 ├── eval_llm.py                   # 模型推理与对话测试（自动测试题 / 手动多轮）
+├── results/                      # CEVAL/CMMLU 原始评测日志
 ├── out/                          # 训练产出权重（{阶段}_{hidden}[_moe][_attn].pth，运行时生成）
 ├── checkpoints/                  # 完整续训状态（optimizer / scheduler / step，运行时生成）
 ├── requirements.txt
@@ -116,45 +117,61 @@ o_t = q_tᵀ S_t
 - 训练优先走 [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
   官方 `chunk_kda` 融合内核，未安装时自动回退纯 PyTorch 内核（CPU 可跑）。
 
+## 实验结果
+
+受控对比：**相同数据、相同训练配方，只改变注意力结构**（AutoDL RTX 5090 32GB，
+lm-evaluation-harness，0-shot，`--apply_chat_template`）。
+
+| 任务 | softmax 基线（8/8 全注意力） | KDA hybrid（6/8 层 KDA） | 差值 | 上游 64M 参考 |
+|---|---|---|---|---|
+| CEVAL-valid | 20.65% ±1.10 | **23.11%** ±1.15 | **+2.46** | 24.89% |
+| CMMLU | 24.49% ±0.40 | **25.09%** ±0.40 | **+0.60** | 25.38% |
+
+原始评测日志（完整逐科目结果）：[results/eval_hybrid.txt](results/eval_hybrid.txt)、
+[results/eval_softmax.txt](results/eval_softmax.txt)
+
+**结论与公平性说明**（避免过度解读）：
+
+1. 结论表述为"**持平或略优、无能力损失**"，而非"显著超越"——64M 规模下这些选择题基准
+   已接近随机线（25%），CEVAL 的差距约 ±1.5σ，CMMLU 的差距落在噪声范围内；
+2. hybrid 参数量比 softmax 多约 8%（63.9M → 69.3M，多出低秩门控网络、ShortConv、A_log/dt_bias），
+   并非等参数对比；
+3. 两次预训练的 batch size 不完全一致（hybrid 用 64、softmax 基线用 32），步数与余弦调度略有差异；
+4. 两个模型都只在 mini 数据集上训练，上游 64M 参考值使用完整语料，仅作外部标尺、不作严格对照。
+
+评测复现命令见下文「模型评测」章节。
+
 ## 四阶段训练流程
 
-统一约定：脚本在 `trainer/` 目录下运行；模型配置（hidden / 层数 / `attn_type` /
-`kda_interval`）在四个阶段必须保持一致。以下命令以 **hybrid（KDA 3:1）** 为例。
+统一约定：
+
+- 命令在 `trainer/` 目录下运行；
+- 模型配置（`hidden_size` / 层数 / `attn_type` / `kda_interval`）在四个阶段必须保持一致；
+- 每个阶段的超参默认值已经写成"开箱即用"的推荐配方（见下方《各阶段默认配方》），
+  因此命令里只显式写**实验变量**和**阶段间衔接**相关的参数：
+  `--attn_type/--kda_interval` 是对比实验的自变量，写出来是为了让配方一目了然
+  （换成 `--attn_type softmax` 即得到同配方的全注意力基线）；
+  其余参数留空即使用默认值。完整参数列表见 `python train_xxx.py --help`。
 
 ### 阶段 1：预训练
 
 ```bash
 cd trainer
-python train_pretrain.py \
-    --epochs 2 --batch_size 32 --learning_rate 5e-4 \
-    --accumulation_steps 8 --max_seq_len 340 \
-    --attn_type hybrid --kda_interval 4 \
-    --data_path ../dataset/pretrain_t2t_mini.jsonl \
-    --use_wandb --wandb_project MiniMind-Pretrain
+python train_pretrain.py --attn_type hybrid --kda_interval 4 --use_wandb
 # 产出 out/pretrain_768_hybrid.pth
 ```
 
 ### 阶段 2：全参 SFT
 
 ```bash
-python train_full_sft.py \
-    --epochs 2 --batch_size 16 --learning_rate 1e-5 \
-    --max_seq_len 768 --attn_type hybrid --kda_interval 4 \
-    --from_weight pretrain \
-    --data_path ../dataset/sft_t2t_mini.jsonl \
-    --use_wandb --wandb_project MiniMind-Full-SFT
+python train_full_sft.py --attn_type hybrid --kda_interval 4 --use_wandb
 # 产出 out/full_sft_768_hybrid.pth
 ```
 
 ### 阶段 3：DPO 偏好对齐
 
 ```bash
-python train_dpo.py \
-    --epochs 1 --batch_size 4 --learning_rate 4e-8 --beta 0.15 \
-    --max_seq_len 1024 --attn_type hybrid --kda_interval 4 \
-    --from_weight full_sft \
-    --data_path ../dataset/dpo.jsonl \
-    --use_wandb --wandb_project MiniMind-DPO
+python train_dpo.py --attn_type hybrid --kda_interval 4 --use_wandb
 # 产出 out/dpo_768_hybrid.pth
 ```
 
@@ -163,17 +180,27 @@ python train_dpo.py \
 需要一个 reward 模型（例如 `internlm2-1_8b-reward`）：
 
 ```bash
-python train_grpo.py \
-    --epochs 1 --batch_size 2 --learning_rate 3e-7 \
-    --num_generations 6 --beta 0.1 --loss_type cispo \
-    --max_seq_len 768 --max_gen_len 1024 \
-    --attn_type hybrid --kda_interval 4 \
-    --from_weight full_sft \
-    --reward_model_path ../../internlm2-1_8b-reward \
-    --data_path ../dataset/rlaif.jsonl \
-    --use_wandb --wandb_project MiniMind-GRPO
+python train_grpo.py --attn_type hybrid --kda_interval 4 \
+    --reward_model_path ../../internlm2-1_8b-reward --use_wandb
 # 产出 out/grpo_768_hybrid.pth
 ```
+
+### 各阶段默认配方
+
+| 参数 | 预训练 | SFT | DPO | GRPO |
+|---|---|---|---|---|
+| `epochs` | 2 | 2 | 1 | 1 |
+| `batch_size` | 32 | 16 | 4 | 2 |
+| `learning_rate` | 5e-4 | 1e-5 | 4e-8 | 3e-7 |
+| `accumulation_steps` | 8 | 1 | 1 | 1 |
+| `max_seq_len` | 340 | 768 | 1024 | 768（prompt） |
+| `data_path` | `pretrain_t2t_mini.jsonl` | `sft_t2t_mini.jsonl` | `dpo.jsonl` | `rlaif.jsonl` |
+| `from_weight` | `none` | `pretrain` | `full_sft` | `full_sft` |
+| 算法超参 | — | — | `beta=0.15` | `beta=0.1`、`loss_type=cispo`、`num_generations=6`、`max_gen_len=1024`、`thinking_ratio=0.9` |
+
+通用默认值：`hidden_size=768`、`num_hidden_layers=8`、`attn_type=hybrid`、`kda_interval=4`、
+`kda_chunk_size=64`、`kda_checkpoint=1`（梯度检查点）、`kda_use_fla=1`（优先 fla 融合内核）、
+`dtype=bfloat16`、`save_dir=../out`。
 
 ### 其他常用选项
 
