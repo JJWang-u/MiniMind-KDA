@@ -1,0 +1,14 @@
+# ---- 核心依赖 ----
+torch>=2.0.0              # PyTorch（Flash Attention 需要 torch>=2.0）
+transformers==4.57.6      # HuggingFace Transformers（PreTrainedModel / tokenizer）
+datasets==3.6.0           # HuggingFace datasets（jsonl 惰性加载）
+numpy>=1.24               # 随机种子等基础工具
+
+# ---- 训练监控（loss 曲线）----
+swanlab==0.7.11           # 实验跟踪平台（wandb 兼容 API）
+
+# ---- GRPO 阶段额外依赖 ----
+requests>=2.28            # SGLang rollout 引擎的 HTTP 调用（可选，仅 --rollout_engine sglang）
+
+# ---- 可选：KDA 官方融合内核（不装则自动回退纯 PyTorch 内核，速度较慢）----
+# flash-linear-attention>=0.3.0   # fla.ops.kda.chunk_kda，Kimi 论文同款 CUDA 内核

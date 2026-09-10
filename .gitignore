@@ -1,0 +1,34 @@
+# ===== 训练产出与断点 =====
+out/
+checkpoints/
+
+# ===== 数据集（约 3GB，超出 GitHub 单文件限制，见 README「数据准备」）=====
+dataset/*.jsonl
+minimind_dataset/
+
+# ===== 权重文件 =====
+*.pth
+*.safetensors
+*.bin
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ===== 训练监控 / 缓存 =====
+swanlog/
+wandb/
+.swanlab/
+.hf_home/
+.hf_cache_test/
+.smoke_tmp/
+
+# ===== 打包产物与系统文件 =====
+*.tar.gz
+*.zip
+.DS_Store
+Thumbs.db
