@@ -57,7 +57,7 @@ MiniMind-KDA/
 │   └── convert_model.py          # torch 权重 → transformers 格式（lm-eval 评测用）
 ├── eval_llm.py                   # 模型推理与对话测试（自动测试题 / 手动多轮）
 ├── results/                      # CEVAL/CMMLU 原始评测日志
-├── images/                       # 四阶段训练曲线截图
+├── images/                       # 训练曲线截图 + 架构示意图
 ├── out/                          # 训练产出权重（{阶段}_{hidden}[_moe][_attn].pth，运行时生成）
 ├── checkpoints/                  # 完整续训状态（optimizer / scheduler / step，运行时生成）
 ├── requirements.txt
@@ -89,7 +89,8 @@ modelscope download --dataset gongjy/minimind_dataset sft_t2t_mini.jsonl    --lo
 
 ## 模型结构
 
-- **规模**：hidden 768 / 8 层 / 8 头 / head_dim 96，约 64M 参数（hybrid +8%）
+- **规模**：hidden 768 / 8 层 / 8 头 / head_dim 96；softmax 全注意力基线 63.9M 参数，
+  KDA hybrid 版本 **69.3M**（+8%，多出的是 KDA 层的短卷积与低秩门控参数）
 - **组件**：RMSNorm（Pre-Norm）、RoPE 位置编码（支持 YaRN 外推）、SwiGLU FFN、
   GQA（Q 头 : KV 头 = 2 : 1）、可选 MoE、权重绑定（embedding = lm_head）
 - **注意力架构**（`attn_type`，本项目的核心改动）：
@@ -99,6 +100,13 @@ modelscope download --dataset gongjy/minimind_dataset sft_t2t_mini.jsonl    --lo
 | `softmax` | 8/8 全注意力 | 原始 MiniMind 基线 |
 | `hybrid`  | 第 0,1,2,4,5,6 层 KDA + 第 3,7 层全注意力 | Kimi Linear 3:1 混合（默认） |
 | `kda`     | 8/8 KDA | 纯线性注意力 |
+
+![MiniMind-KDA 结构](images/architecture_kda.png)
+
+*图 1：MiniMind-KDA 整体结构。左栏是语言模型主流程与 8 层混合堆叠（6 层 KDA + 2 层全注意力）；
+中栏 (a) 是 KDA 层内部——不接 RoPE（位置信息来自时间衰减）、q/k 过 ShortConv + L2Norm（v 不归一化）、
+核心是固定大小状态矩阵 S 的递推、门控走旁路；右栏 (b) 是保留的全注意力层（QK-Norm + RoPE + GQA，
+KV cache 随序列增长），(c) 是两种层共用的 SwiGLU FFN。标注的参数量为各层实测值。*
 
 ## KDA 是什么
 
@@ -117,6 +125,14 @@ o_t = q_tᵀ S_t
   `kda_core_chunked`（DPLR 树形并行扫描 + 逐块梯度检查点，训练路径）；
 - 训练优先走 [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
   官方 `chunk_kda` 融合内核，未安装时自动回退纯 PyTorch 内核（CPU 可跑）。
+
+![KDA 分块并行计算](images/chunk_kda_flow.png)
+
+*图 2：KDA 的分块并行计算流程。序列被切成 NT = T/C 个块：*
+
+- **① 块内计算**：门控 cumsum、构造块内的 A_kk / A_qk、三角求逆（solve_tril）得到 w、u —— 各块之间互不依赖、完全并行；
+- **② 块间状态扫描**：全流程唯一的串行部分，只迭代 NT 次。h_c 就是块起始时刻的状态矩阵（即 KDA 公式里的 S 在块边界上的快照），每步只更新一个 K×V 矩阵；
+- **③ 输出**：各块再次并行，结果为 carrier（来自块起始状态 h_c）+ 块内因果注意力两部分之和，最后拼接回完整序列。
 
 ## 实验结果
 
