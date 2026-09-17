@@ -57,6 +57,7 @@ MiniMind-KDA/
 │   └── convert_model.py          # torch 权重 → transformers 格式（lm-eval 评测用）
 ├── eval_llm.py                   # 模型推理与对话测试（自动测试题 / 手动多轮）
 ├── results/                      # CEVAL/CMMLU 原始评测日志
+├── images/                       # 四阶段训练曲线截图
 ├── out/                          # 训练产出权重（{阶段}_{hidden}[_moe][_attn].pth，运行时生成）
 ├── checkpoints/                  # 完整续训状态（optimizer / scheduler / step，运行时生成）
 ├── requirements.txt
@@ -214,8 +215,28 @@ python train_grpo.py --attn_type hybrid --kda_interval 4 \
 
 ## 训练曲线
 
-`--use_wandb` 会把 loss / lr / epoch_time（GRPO 还有 reward / KL / advantage 等）
-记录到 [swanlab](https://swanlab.cn)，四个阶段分别建项目即可查看曲线。
+四阶段训练过程由 [swanlab](https://swanlab.cn) 记录（以下均为 mini 数据集的实验）：
+
+| 预训练（400 step） | SFT（600 step） |
+|---|---|
+| ![pretrain](images/curve_pretrain.png) | ![sft](images/curve_sft.png) |
+
+| DPO（43 step） | GRPO（500 step） |
+|---|---|
+| ![dpo](images/curve_dpo.png) | ![grpo](images/curve_grpo.png) |
+
+怎么读这些曲线：
+
+- **预训练 / SFT**：loss 单调下降（预训练 7.0→2.5，SFT 2.2→1.6），
+  learning_rate 呈余弦退火、epoch_time 逐 epoch 下降，`aux_loss` 恒为 0（非 MoE 结构）；
+- **DPO**：loss 在 0.35~0.9 之间震荡、**没有下降趋势，这属于正常现象**——
+  DPO 的 loss 绝对值不直接反映偏好质量（它衡量的是相对参考模型的隐式奖励差），
+  且本阶段只训练了 43 step；
+- **GRPO**：reward 全程震荡，KL 参考值维持在 ±0.02 以内（策略未明显偏离参考模型），
+  生成长度 200~450 且无塌缩趋势；其中 `advantages_std` 因组内标准化而恒定为 ≈1，
+  不含趋势信息，仅用于确认 advantage 计算正常。
+
+复现自己的曲线：给训练脚本加上 `--use_wandb` 即可（四个阶段分别建 swanlab 项目）。
 
 ## 模型评测
 
